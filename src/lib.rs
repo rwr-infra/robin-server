@@ -6,6 +6,10 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{error, info};
 
+pub mod domain;
+pub mod parsers;
+pub mod upstream;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MapsConfig {
     pub maps: Vec<MapEntry>,
