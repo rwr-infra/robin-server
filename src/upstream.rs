@@ -50,6 +50,21 @@ impl UpstreamClient {
         }
     }
 
+    /// Base URL of the upstream server list endpoint.
+    pub fn server_list_url(&self) -> &str {
+        &self.server_list_url
+    }
+
+    /// Base URL of the upstream player leaderboard endpoint.
+    pub fn player_list_url(&self) -> &str {
+        &self.player_list_url
+    }
+
+    /// Shared response cache used for every upstream request.
+    pub fn cache(&self) -> &Arc<ApiCache> {
+        &self.cache
+    }
+
     /// Fetch every server, following `start=0,100,...` pages.
     ///
     /// Stops on the first short page or after [`MAX_SERVER_PAGES`], and drops
@@ -160,6 +175,12 @@ impl RwrsService {
     /// Service with an explicitly constructed client, used by tests.
     pub fn with_client(client: UpstreamClient) -> Self {
         Self { client }
+    }
+
+    /// Underlying upstream client; the passthrough handlers use it to build
+    /// the original upstream URL and share the response cache.
+    pub fn upstream(&self) -> &UpstreamClient {
+        &self.client
     }
 
     /// Fetch all servers, filter, then paginate.

@@ -181,6 +181,132 @@ curl "http://localhost:5800/api/player_list?sort=kills&order=desc"
 curl http://localhost:5800/api/player_list
 ```
 
+### GET /api/servers.json
+
+Returns the server list normalized to JSON. Filtering happens over the complete server list (the upstream is followed for up to 10 pages of 100 servers, de-duplicated by `address:port`) and pagination is applied afterwards. All field names are camelCase.
+
+#### Query Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `search` | string | (empty) | Case-insensitive match against name, IP address, port, country, mode, map id/name, comment and player names |
+| `online_only` | boolean | `false` | Only servers with at least one current player |
+| `map` | string | (empty) | Case-insensitive substring match on map id or map name |
+| `mode` | string | (empty) | Case-insensitive substring match on game mode |
+| `country` | string | (empty) | Case-insensitive substring match on country code |
+| `offset` | integer | `0` | Number of matching servers to skip; must be `>= 0` |
+| `limit` | integer | `20` | Page size; must be between `1` and `100` |
+
+#### Response Format
+
+```json
+{
+  "total": 2,
+  "offset": 0,
+  "limit": 2,
+  "servers": [
+    {
+      "id": "127.0.0.1:1234",
+      "name": "Alpha Server",
+      "ipAddress": "127.0.0.1",
+      "port": 1234,
+      "mapId": "desert_town",
+      "mapName": "Desert Town",
+      "bots": 0,
+      "country": "US",
+      "currentPlayers": 10,
+      "timeStamp": 1234567890,
+      "version": "1",
+      "dedicated": true,
+      "mod": false,
+      "playerList": ["Player1", "Player2"],
+      "comment": "",
+      "url": "",
+      "maxPlayers": 32,
+      "mode": "Invasion",
+      "realm": null
+    }
+  ]
+}
+```
+
+`total` counts every server matching the filters before pagination; `servers` only holds the requested page. `id` is `address:port`, which stays stable across upstream reordering.
+
+Example:
+
+```bash
+curl "http://localhost:5800/api/servers.json?search=desert&online_only=true&limit=10"
+```
+
+### GET /api/players.json
+
+Returns one page of the player leaderboard normalized to JSON. The upstream table is parsed into the same fields the web frontend uses, and all field names are camelCase.
+
+#### Query Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `search` | string | (empty) | Player name filter, delegated to the upstream leaderboard |
+| `db` | string | `invasion` | Leaderboard: `invasion`, `pacific` or `prereset_invasion` |
+| `sort` | string | `rank_progression` | One of `rank_progression`, `username`, `kills`, `deaths`, `kd`, `score`, `time_played`, `teamkills`, `longest_kill_streak`, `targets_destroyed`, `vehicles_destroyed`, `soldiers_healed`, `distance_moved`, `shots_fired`, `throwables_thrown`, `sid` |
+| `offset` | integer | `0` | Number of rows to skip; must be `>= 0` |
+| `limit` | integer | `20` | Page size; must be between `1` and `100` |
+
+#### Response Format
+
+```json
+{
+  "db": "pacific",
+  "offset": 0,
+  "limit": 2,
+  "hasNext": true,
+  "hasPrevious": false,
+  "players": [
+    {
+      "id": "pacific:PlayerOne",
+      "username": "PlayerOne",
+      "db": "pacific",
+      "rowNumber": 1,
+      "rankProgression": 100,
+      "kills": 1000,
+      "deaths": 500,
+      "score": 5000,
+      "teamkills": 2,
+      "longestKillStreak": 15,
+      "targetsDestroyed": 20,
+      "vehiclesDestroyed": 5,
+      "soldiersHealed": 30,
+      "shotsFired": 1000,
+      "throwablesThrown": 50,
+      "kd": 2.0,
+      "timePlayed": "10h 30m",
+      "distanceMoved": "10000m",
+      "rankName": "Captain",
+      "rankIcon": "/rank/captain.png"
+    }
+  ]
+}
+```
+
+Numbers missing from the upstream table are `null` rather than `0`. `hasNext` / `hasPrevious` mirror the pagination links of the upstream page. `id` is `db:username`.
+
+**Search window behavior**: when `search` is supplied, the upstream `view_players.php` ignores the `start` parameter and always answers from the beginning of its own result set. The returned `offset` / `limit` therefore do not slice the search window; use `hasNext` / `hasPrevious` to walk the pages the upstream exposes.
+
+Example:
+
+```bash
+curl "http://localhost:5800/api/players.json?db=pacific&sort=kills&limit=10"
+```
+
+#### Errors
+
+Both JSON endpoints answer with a JSON body on failure:
+
+- `400 Bad Request` — invalid query parameter (unknown `db`/`sort`, `limit` outside `1`–`100`, negative `offset`, non-boolean `online_only`, ...): `{"error": "..."}`. The upstream is not contacted.
+- `502 Bad Gateway` — the upstream request failed or returned data that could not be parsed: `{"error": "..."}`.
+
+The existing `/api/server_list` and `/api/player_list` endpoints are untouched raw passthroughs; they keep returning the upstream HTML/XML with the original query string.
+
 ## Maps Configuration
 
 Maps are configured through a JSON file specified by the `MAPS_CONFIG` environment variable (default: `maps.json`). The configuration is exposed via the `/api/maps` endpoint.

@@ -8,6 +8,7 @@ use tracing::{error, info};
 
 pub mod domain;
 pub mod parsers;
+pub mod routes;
 pub mod upstream;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
