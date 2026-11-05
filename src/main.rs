@@ -1,11 +1,15 @@
 use salvo::prelude::*;
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 // Import from lib.rs
+use rwrs_server::mcp;
 use rwrs_server::routes::build_router;
 use rwrs_server::upstream::RwrsService;
-use rwrs_server::{Announcement, ApiCache, Config, MapsConfig};
+use rwrs_server::{
+    Announcement, ApiCache, Config, MapsConfig, default_mcp_allowed_hosts, format_mcp_url,
+    is_loopback_host, mcp_port_conflicts_with_main,
+};
 
 #[tokio::main]
 async fn main() {
@@ -64,6 +68,56 @@ async fn main() {
     // Create config for sharing
     let config = Arc::new(config);
     let data_service = Arc::new(RwrsService::new(cache));
+
+    match config.mcp_port {
+        Some(port) if mcp_port_conflicts_with_main(Some(port), &config.port) => {
+            error!(
+                "MCP_PORT {} conflicts with the main PORT {}; MCP listener disabled",
+                port, config.port
+            );
+        }
+        Some(port) => {
+            // Resolve the MCP Host allowlist. Explicit configuration wins;
+            // otherwise a loopback bind gets the rmcp default allowlist. A
+            // non-loopback bind without MCP_ALLOWED_HOSTS disables Host
+            // validation, which is unsafe for an unauthenticated endpoint, so
+            // say so loudly.
+            let allowed_hosts = match config.mcp_allowed_hosts.clone() {
+                Some(hosts) => Some(hosts),
+                None if is_loopback_host(&config.mcp_host) => {
+                    Some(default_mcp_allowed_hosts(&config.mcp_host))
+                }
+                None => {
+                    warn!(
+                        "MCP_HOST '{}' is not loopback and MCP_ALLOWED_HOSTS is not set; \
+                         disabling rmcp Host header validation. The MCP endpoint has no \
+                         authentication: expose it only behind a protected reverse proxy.",
+                        config.mcp_host
+                    );
+                    None
+                }
+            };
+
+            info!(
+                "MCP Streamable HTTP listening at {}",
+                format_mcp_url(&config.mcp_host, port)
+            );
+            if let Some(hosts) = &allowed_hosts {
+                info!("  - MCP allowed hosts: {}", hosts.join(", "));
+            }
+
+            let mcp_host = config.mcp_host.clone();
+            let service = data_service.clone();
+            let maps = maps_config.clone();
+            tokio::spawn(async move {
+                match mcp::serve_http(&mcp_host, port, service, maps, allowed_hosts).await {
+                    Ok(()) => info!("MCP server stopped"),
+                    Err(error) => error!("MCP server failed on {}:{}: {}", mcp_host, port, error),
+                }
+            });
+        }
+        None => info!("MCP server disabled (MCP_PORT=0)"),
+    }
 
     let router = build_router(config, maps_config, announcement, data_service);
 

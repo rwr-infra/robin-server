@@ -141,6 +141,9 @@ mod tests {
             android_repo_url: None,
             web_repo_url: None,
             announcement_path: None,
+            mcp_host: "127.0.0.1".to_string(),
+            mcp_port: None,
+            mcp_allowed_hosts: None,
         }
     }
 

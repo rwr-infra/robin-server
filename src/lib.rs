@@ -7,9 +7,19 @@ use tokio::sync::RwLock;
 use tracing::{error, info};
 
 pub mod domain;
+pub mod mcp;
 pub mod parsers;
 pub mod routes;
 pub mod upstream;
+
+/// Default port of the MCP Streamable HTTP listener.
+pub const DEFAULT_MCP_PORT: u16 = 5801;
+
+/// Default interface of the MCP listener.
+///
+/// Deliberately independent of `HOST`: the unauthenticated MCP endpoint must
+/// not become public just because the main API binds to `0.0.0.0`.
+pub const DEFAULT_MCP_HOST: &str = "127.0.0.1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MapsConfig {
@@ -201,6 +211,112 @@ pub struct Config {
     pub android_repo_url: Option<String>,
     pub web_repo_url: Option<String>,
     pub announcement_path: Option<String>,
+    /// Interface the MCP listener binds to; defaults to [`DEFAULT_MCP_HOST`]
+    /// and never inherits `HOST`.
+    pub mcp_host: String,
+    /// MCP listener port; `None` disables the MCP transport entirely.
+    pub mcp_port: Option<u16>,
+    /// Explicit `Host` header allowlist for the MCP transport.
+    pub mcp_allowed_hosts: Option<Vec<String>>,
+}
+
+/// Parse the `MCP_PORT` environment value.
+///
+/// Unset or empty means the default port 5801, `0` disables MCP, an invalid
+/// value falls back to 5801 and logs a warning.
+pub fn parse_mcp_port(raw: Option<&str>) -> Option<u16> {
+    let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Some(DEFAULT_MCP_PORT);
+    };
+    match raw.parse::<u16>() {
+        Ok(0) => None,
+        Ok(port) => Some(port),
+        Err(_) => {
+            tracing::warn!(
+                "invalid MCP_PORT '{}', expected 0..=65535; using {}",
+                raw,
+                DEFAULT_MCP_PORT
+            );
+            Some(DEFAULT_MCP_PORT)
+        }
+    }
+}
+
+/// Whether the MCP listener and the main server would bind the same port.
+///
+/// `main_port` is the raw `PORT` value; anything that is not a valid port
+/// number cannot conflict.
+pub fn mcp_port_conflicts_with_main(mcp_port: Option<u16>, main_port: &str) -> bool {
+    match (mcp_port, main_port.trim().parse::<u16>()) {
+        (Some(mcp_port), Ok(main_port)) => mcp_port == main_port,
+        _ => false,
+    }
+}
+
+/// Parse a comma-separated `MCP_ALLOWED_HOSTS` value.
+///
+/// Empty entries and surrounding whitespace are dropped; an unset or empty
+/// result means no explicit allowlist.
+pub fn parse_allowed_hosts(raw: Option<&str>) -> Option<Vec<String>> {
+    let hosts: Vec<String> = raw
+        .into_iter()
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|host| !host.is_empty())
+        .map(str::to_string)
+        .collect();
+    (!hosts.is_empty()).then_some(hosts)
+}
+
+/// Strip one pair of surrounding `[...]` from an IPv6 literal.
+fn strip_brackets(host: &str) -> &str {
+    host.strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(host)
+}
+
+/// Default `Host` allowlist for a loopback MCP bind address.
+///
+/// The rmcp defaults cover the usual loopback names; a bind address outside
+/// that set (for example `127.0.0.2`) is appended so its own requests are not
+/// rejected.
+pub fn default_mcp_allowed_hosts(host: &str) -> Vec<String> {
+    let mut hosts = vec![
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+        "::1".to_string(),
+    ];
+    let host = strip_brackets(host.trim());
+    if !host.is_empty()
+        && !hosts
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(host))
+    {
+        hosts.push(host.to_string());
+    }
+    hosts
+}
+
+/// Build the human-facing MCP endpoint URL, bracketing IPv6 literals.
+pub fn format_mcp_url(host: &str, port: u16) -> String {
+    let host = host.trim();
+    if host.contains(':') && !(host.starts_with('[') && host.ends_with(']')) {
+        format!("http://[{host}]:{port}/mcp")
+    } else {
+        format!("http://{host}:{port}/mcp")
+    }
+}
+
+/// Whether `host` is a loopback name or address.
+pub fn is_loopback_host(host: &str) -> bool {
+    let host = host.trim();
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    let host = strip_brackets(host);
+    host.parse::<std::net::IpAddr>()
+        .map(|address| address.is_loopback())
+        .unwrap_or(false)
 }
 
 impl Config {
@@ -224,6 +340,18 @@ impl Config {
         // Optional path to the header announcement HTML file. Unset = no announcement.
         let announcement_path = env::var("ANNOUNCEMENT_PATH").ok();
 
+        // MCP listener: separate port so the Salvo API and the rmcp/axum
+        // transport can run side by side in the same process. The bind address
+        // never inherits HOST: the MCP endpoint has no authentication, so a
+        // HOST=0.0.0.0 deployment must opt in with an explicit MCP_HOST.
+        let mcp_host = env::var("MCP_HOST")
+            .ok()
+            .map(|value| strip_brackets(value.trim()).to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| DEFAULT_MCP_HOST.to_string());
+        let mcp_port = parse_mcp_port(env::var("MCP_PORT").ok().as_deref());
+        let mcp_allowed_hosts = parse_allowed_hosts(env::var("MCP_ALLOWED_HOSTS").ok().as_deref());
+
         Ok(Config {
             port: port.to_string(),
             host: host.to_string(),
@@ -232,6 +360,9 @@ impl Config {
             android_repo_url,
             web_repo_url,
             announcement_path,
+            mcp_host,
+            mcp_port,
+            mcp_allowed_hosts,
         })
     }
 }

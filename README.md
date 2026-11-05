@@ -58,6 +58,9 @@ CACHE_DURATION_SECS=60 RATE_LIMIT_SECS=10 cargo run
 | `ANDROID_REPO_URL` | (empty) | GitHub repository URL for Android app releases |
 | `WEB_REPO_URL` | (empty) | GitHub repository URL for Web app releases |
 | `ANNOUNCEMENT_PATH` | (empty) | Path to an HTML file whose content is served as the header announcement |
+| `MCP_HOST` | `127.0.0.1` | Bind address of the MCP Streamable HTTP listener; independent of `HOST`. IPv6 may be written `::1` or `[::1]`; brackets are normalized away |
+| `MCP_PORT` | `5801` | MCP listener port; `0` disables the MCP listener entirely; invalid values fall back to `5801` with a warning |
+| `MCP_ALLOWED_HOSTS` | (empty) | Comma-separated `Host` header allowlist for MCP; unset on a loopback bind means `localhost,127.0.0.1,::1` plus the bind address itself, unset on a non-loopback bind disables `Host` validation |
 
 ## API Endpoints
 
@@ -306,6 +309,82 @@ Both JSON endpoints answer with a JSON body on failure:
 - `502 Bad Gateway` — the upstream request failed or returned data that could not be parsed: `{"error": "..."}`.
 
 The existing `/api/server_list` and `/api/player_list` endpoints are untouched raw passthroughs; they keep returning the upstream HTML/XML with the original query string.
+
+## MCP Server
+
+The process also serves a [Model Context Protocol](https://modelcontextprotocol.io) server over **Streamable HTTP** on a separate listener. It exposes the same normalized data as the JSON endpoints through four read-only tools.
+
+- Endpoint: `http://<MCP_HOST>:<MCP_PORT>/mcp` (default `http://127.0.0.1:5801/mcp`).
+- Transport: Streamable HTTP, **stateless** (`legacy_session_mode` off, plain JSON responses). Every `POST /mcp` is independent; no `Mcp-Session-Id` bookkeeping is required.
+- Tool results carry their payload in `structuredContent`, and failures set `isError: true` with a `structuredContent.error` message. Invalid arguments (unknown `db`/`sort`, `limit` out of range, ...) are JSON-RPC `-32602` errors instead.
+- The server is read-only: no writes, no arbitrary URL proxying.
+
+### Tools
+
+| Tool | Parameters | Result |
+|------|------------|--------|
+| `list_servers` | `search`, `online_only`, `map`, `mode`, `country`, `offset`, `limit` — same semantics as `/api/servers.json` | `{total, offset, limit, servers}` |
+| `get_server` | `address` (string), `port` (integer) | One server object, or `isError` with `{error: "server not found"}` |
+| `search_players` | `search`, `db`, `sort`, `offset`, `limit` — same semantics as `/api/players.json` | `{db, offset, limit, hasNext, hasPrevious, players}` |
+| `list_maps` | none | `{maps: [{name, path, image}]}` |
+
+Like the REST player endpoint, `search_players` delegates `search` to the upstream leaderboard, whose search mode ignores `start`; use `hasNext`/`hasPrevious` to walk those pages.
+
+### Connecting
+
+Claude Code:
+
+```bash
+claude mcp add --transport http rwrs http://127.0.0.1:5801/mcp
+```
+
+Any MCP client configured for Streamable HTTP uses the same URL; there is no authentication.
+
+Raw `curl` walkthrough (initialize, then list tools, then call one):
+
+```bash
+# 1. initialize
+curl -sS -X POST http://127.0.0.1:5801/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2025-11-25' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"curl","version":"0.1.0"}}}'
+
+# 2. list tools
+curl -sS -X POST http://127.0.0.1:5801/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2025-11-25' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+
+# 3. call a tool
+curl -sS -X POST http://127.0.0.1:5801/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2025-11-25' \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_servers","arguments":{"limit":2}}}'
+```
+
+### Configuration and security
+
+- `MCP_HOST` defaults to `127.0.0.1` and never inherits `HOST`: with `HOST=0.0.0.0` the MCP listener stays on loopback unless `MCP_HOST` is set explicitly. IPv6 addresses may be written `::1` or `[::1]`; brackets are normalized to `::1`. `MCP_PORT` defaults to `5801`.
+- `MCP_PORT` must differ from `PORT`; if both name the same port the MCP listener is disabled with an error log and the main server keeps running.
+- `MCP_PORT=0` disables the MCP listener; the main JSON/static server keeps running normally.
+- No authentication, OAuth or rate limiting is implemented. Keep the listener on loopback (the default) and put it behind a reverse proxy that authenticates and filters requests before exposing it.
+- MCP validates the incoming `Host` header to block DNS-rebinding. When `MCP_ALLOWED_HOSTS` is unset, a loopback `MCP_HOST` gets `localhost,127.0.0.1,::1`; a non-loopback `MCP_HOST` disables that validation and logs a warning. Set `MCP_ALLOWED_HOSTS=example.com,example.com:5801` to allow public hostnames explicitly.
+
+Docker:
+
+```bash
+docker run -d -p 80:80 -p 5801:5801 --name rwrs-server \
+  -e HOST=0.0.0.0 \
+  -e PORT=80 \
+  -e MCP_HOST=0.0.0.0 \
+  -e MCP_ALLOWED_HOSTS=rwrs.example.com \
+  zhaozisong0/rwrs-server:latest
+```
+
+`MCP_ALLOWED_HOSTS` must contain the hostname clients put in the URL (here `rwrs.example.com`); anything else is rejected with HTTP 403 before reaching a tool. Publishing port 5801 exposes an unauthenticated endpoint, so terminate authentication/TLS in a reverse proxy or restrict access at the network level. To keep MCP off entirely, add `-e MCP_PORT=0`.
 
 ## Maps Configuration
 
