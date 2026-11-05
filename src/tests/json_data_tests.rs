@@ -1158,6 +1158,8 @@ mod tests {
             ("ALPHA", "127.0.0.1:1234"),
             ("9000", "127.0.0.3:9000"),
             ("killhouse", "127.0.0.2:5678"),
+            ("friendly", "127.0.0.1:1234"),
+            ("127.0.0.2", "127.0.0.2:5678"),
         ] {
             let response = service
                 .list_servers(&ServerQuery {
