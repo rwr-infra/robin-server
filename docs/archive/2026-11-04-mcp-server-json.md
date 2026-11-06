@@ -60,6 +60,14 @@ rwrs-server 现在有两层只读 JSON 查询面：普通 HTTP `/api/servers.jso
 - README 既有陈旧内容未修：`/api/ping` 实际为 `/ping`、`RATE_LIMIT_SECS` 无实现、`/api/maps` 文档写 `{"maps":[...]}` 实际为裸数组、Testing 小节描述旧目录。
 - `CLAUDE.md` 仍写 salvo 0.76.2 / 单 main.rs；已在归档中建议更新。
 
+## 后续更新（2026-11-06）
+
+- `ApiCache` 增加 per-URL single-flight：并发冷请求只触发一次上游请求；新增并发测试。
+- README 陈旧项已修：`/ping` 路径、删除未实现的 `RATE_LIMIT_SECS`、`/api/maps` 裸数组响应、`src/tests/` 测试结构与命令。
+- Docker musl 镜像已实际构建成功；`messense/rust-musl-cross:x86_64-musl` 当前为 rustc 1.96.1，满足 rmcp 的 Rust 1.88 MSRV。
+- K8s 部署改为单公网入口：Service 增加 5801，Traefik 增加 `/mcp` 路由；配置在 `k8s-remote-config` 的 `feature/robin-mcp-single-port` 分支。
+- 仍未做：MCP 鉴权/限流、进程级 `MCP_PORT=0` 自动化测试、真实 MCP 客户端验证、推送与部署。
+
 ## 指针
 
 - 数据层：`src/domain.rs`、`src/parsers.rs`、`src/upstream.rs`
