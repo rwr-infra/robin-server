@@ -158,7 +158,7 @@ impl RwrsMcp {
 }
 
 #[tool_handler(
-    name = "rwrs-server",
+    name = "robin rwr",
     instructions = "Read-only Running with Rifles data: live servers and player leaderboards from the public upstream. Use list_servers/search_players for queries; player search anchors its window around a match."
 )]
 impl ServerHandler for RwrsMcp {}
