@@ -42,8 +42,8 @@ By default, the server will start on `127.0.0.1:5800`. You can modify this using
 # Custom IP and port
 HOST=0.0.0.0 PORT=8080 cargo run
 
-# Custom cache and rate limiting settings
-CACHE_DURATION_SECS=60 RATE_LIMIT_SECS=10 cargo run
+# Custom cache expiry
+CACHE_DURATION_SECS=60 cargo run
 ```
 
 ## Environment Variables
@@ -54,7 +54,6 @@ CACHE_DURATION_SECS=60 RATE_LIMIT_SECS=10 cargo run
 | `PORT` | `5800` | Server port |
 | `MAPS_CONFIG` | `maps.json` | Maps configuration file path |
 | `CACHE_DURATION_SECS` | `3` | Cache expiry time in seconds |
-| `RATE_LIMIT_SECS` | `3` | Rate limit interval in seconds |
 | `ANDROID_REPO_URL` | (empty) | GitHub repository URL for Android app releases |
 | `WEB_REPO_URL` | (empty) | GitHub repository URL for Web app releases |
 | `ANNOUNCEMENT_PATH` | (empty) | Path to an HTML file whose content is served as the header announcement |
@@ -64,7 +63,7 @@ CACHE_DURATION_SECS=60 RATE_LIMIT_SECS=10 cargo run
 
 ## API Endpoints
 
-### GET /api/ping
+### GET /ping
 
 Health check endpoint that returns "pong".
 
@@ -386,6 +385,13 @@ docker run -d -p 80:80 -p 5801:5801 --name rwrs-server \
 
 `MCP_ALLOWED_HOSTS` must contain the hostname clients put in the URL (here `rwrs.example.com`); anything else is rejected with HTTP 403 before reaching a tool. Publishing port 5801 exposes an unauthenticated endpoint, so terminate authentication/TLS in a reverse proxy or restrict access at the network level. To keep MCP off entirely, add `-e MCP_PORT=0`.
 
+Kubernetes:
+
+- Set `MCP_HOST=0.0.0.0` inside the Pod; a Service or Ingress cannot reach the Pod's loopback interface.
+- Add a ClusterIP Service port for `5801` and route the `/mcp` Ingress path to it. Keep `5801` off the public edge; only the existing 80/443 entry point needs to be exposed.
+- `MCP_ALLOWED_HOSTS` must contain the public Ingress hostname, for example `robin.example.com`.
+- Restrict the `5801` Service port with a `NetworkPolicy` that allows only the Ingress controller.
+
 ## Maps Configuration
 
 Maps are configured through a JSON file specified by the `MAPS_CONFIG` environment variable (default: `maps.json`). The configuration is exposed via the `/api/maps` endpoint.
@@ -441,15 +447,13 @@ Create a `maps.json` file in the same directory as the executable (or specify a 
 Returns a JSON response with all configured maps:
 
 ```json
-{
-  "maps": [
-    {
-      "name": "map9",
-      "path": "media/packages/vanilla.desert/maps/map9",
-      "image": "md5_1.png"
-    }
-  ]
-}
+[
+  {
+    "name": "map9",
+    "path": "media/packages/vanilla.desert/maps/map9",
+    "image": "md5_1.png"
+  }
+]
 ```
 
 ### Configuration Examples
@@ -668,16 +672,13 @@ services:
 
 ```bash
 # Run all tests
-cargo test
+cargo test --all-features
 
 # Run tests with output
-cargo test -- --nocapture
+cargo test --all-features -- --nocapture
 
-# Run specific test module
-cargo test api_cache_tests
-
-# Run integration tests only
-cargo test --test '*'
+# Run a specific test module
+cargo test --all-features cache_tests
 
 # Run tests with coverage (requires cargo-llvm-cov)
 cargo install cargo-llvm-cov
@@ -703,11 +704,13 @@ open target/llvm-cov/html/index.html
 
 ### Test Structure
 
-- **Unit Tests**: Located in `tests/` directory
-  - `api_cache_tests.rs` - Tests for ApiCache functionality
-  - `maps_config_tests.rs` - Tests for MapsConfig loading and parsing
-  - `api_endpoints_tests.rs` - Integration tests for API endpoints
-  - `test_data/` - Test configuration and data files
+- **Tests**: Located in `src/tests/` and compiled as part of the crate
+  - `basic_tests.rs` - Config, maps, announcement, and version helpers
+  - `cache_tests.rs` - `ApiCache` caching and single-flight behavior
+  - `integration_tests.rs` - Maps configuration file loading
+  - `json_api_tests.rs` - Salvo routes, query validation, and error mapping
+  - `json_data_tests.rs` - Upstream parsers, pagination, and query facade
+  - `mcp_tests.rs` - MCP protocol, tools, and `Host` validation
 
 ### Continuous Integration
 
