@@ -42,8 +42,8 @@ By default, the server will start on `127.0.0.1:5800`. You can modify this using
 # Custom IP and port
 HOST=0.0.0.0 PORT=8080 cargo run
 
-# Custom cache and rate limiting settings
-CACHE_DURATION_SECS=60 RATE_LIMIT_SECS=10 cargo run
+# Custom cache expiry
+CACHE_DURATION_SECS=60 cargo run
 ```
 
 ## Environment Variables
@@ -54,14 +54,16 @@ CACHE_DURATION_SECS=60 RATE_LIMIT_SECS=10 cargo run
 | `PORT` | `5800` | Server port |
 | `MAPS_CONFIG` | `maps.json` | Maps configuration file path |
 | `CACHE_DURATION_SECS` | `3` | Cache expiry time in seconds |
-| `RATE_LIMIT_SECS` | `3` | Rate limit interval in seconds |
 | `ANDROID_REPO_URL` | (empty) | GitHub repository URL for Android app releases |
 | `WEB_REPO_URL` | (empty) | GitHub repository URL for Web app releases |
 | `ANNOUNCEMENT_PATH` | (empty) | Path to an HTML file whose content is served as the header announcement |
+| `MCP_HOST` | `127.0.0.1` | Bind address of the MCP Streamable HTTP listener; independent of `HOST`. IPv6 may be written `::1` or `[::1]`; brackets are normalized away |
+| `MCP_PORT` | `5801` | MCP listener port; `0` disables the MCP listener entirely; invalid values fall back to `5801` with a warning |
+| `MCP_ALLOWED_HOSTS` | (empty) | Comma-separated `Host` header allowlist for MCP; unset on a loopback bind means `localhost,127.0.0.1,::1` plus the bind address itself, unset on a non-loopback bind disables `Host` validation |
 
 ## API Endpoints
 
-### GET /api/ping
+### GET /ping
 
 Health check endpoint that returns "pong".
 
@@ -181,6 +183,215 @@ curl "http://localhost:5800/api/player_list?sort=kills&order=desc"
 curl http://localhost:5800/api/player_list
 ```
 
+### GET /api/servers.json
+
+Returns the server list normalized to JSON. Filtering happens over the complete server list (the upstream is followed for up to 10 pages of 100 servers, de-duplicated by `address:port`) and pagination is applied afterwards. All field names are camelCase.
+
+#### Query Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `search` | string | (empty) | Case-insensitive match against name, IP address, port, country, mode, map id/name, comment and player names |
+| `online_only` | boolean | `false` | Only servers with at least one current player |
+| `map` | string | (empty) | Case-insensitive substring match on map id or map name |
+| `mode` | string | (empty) | Case-insensitive substring match on game mode |
+| `country` | string | (empty) | Case-insensitive substring match on country code |
+| `offset` | integer | `0` | Number of matching servers to skip; must be `>= 0` |
+| `limit` | integer | `20` | Page size; must be between `1` and `100` |
+
+#### Response Format
+
+```json
+{
+  "total": 2,
+  "offset": 0,
+  "limit": 2,
+  "servers": [
+    {
+      "id": "127.0.0.1:1234",
+      "name": "Alpha Server",
+      "ipAddress": "127.0.0.1",
+      "port": 1234,
+      "mapId": "desert_town",
+      "mapName": "Desert Town",
+      "bots": 0,
+      "country": "US",
+      "currentPlayers": 10,
+      "timeStamp": 1234567890,
+      "version": "1",
+      "dedicated": true,
+      "mod": false,
+      "playerList": ["Player1", "Player2"],
+      "comment": "",
+      "url": "",
+      "maxPlayers": 32,
+      "mode": "Invasion",
+      "realm": null
+    }
+  ]
+}
+```
+
+`total` counts every server matching the filters before pagination; `servers` only holds the requested page. `id` is `address:port`, which stays stable across upstream reordering.
+
+Example:
+
+```bash
+curl "http://localhost:5800/api/servers.json?search=desert&online_only=true&limit=10"
+```
+
+### GET /api/players.json
+
+Returns one page of the player leaderboard normalized to JSON. The upstream table is parsed into the same fields the web frontend uses, and all field names are camelCase.
+
+#### Query Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `search` | string | (empty) | Player name filter, delegated to the upstream leaderboard |
+| `db` | string | `invasion` | Leaderboard: `invasion`, `pacific` or `prereset_invasion` |
+| `sort` | string | `rank_progression` | One of `rank_progression`, `username`, `kills`, `deaths`, `kd`, `score`, `time_played`, `teamkills`, `longest_kill_streak`, `targets_destroyed`, `vehicles_destroyed`, `soldiers_healed`, `distance_moved`, `shots_fired`, `throwables_thrown`, `sid` |
+| `offset` | integer | `0` | Number of rows to skip; must be `>= 0` |
+| `limit` | integer | `20` | Page size; must be between `1` and `100` |
+
+#### Response Format
+
+```json
+{
+  "db": "pacific",
+  "offset": 0,
+  "limit": 2,
+  "hasNext": true,
+  "hasPrevious": false,
+  "players": [
+    {
+      "id": "pacific:PlayerOne",
+      "username": "PlayerOne",
+      "db": "pacific",
+      "rowNumber": 1,
+      "rankProgression": 100,
+      "kills": 1000,
+      "deaths": 500,
+      "score": 5000,
+      "teamkills": 2,
+      "longestKillStreak": 15,
+      "targetsDestroyed": 20,
+      "vehiclesDestroyed": 5,
+      "soldiersHealed": 30,
+      "shotsFired": 1000,
+      "throwablesThrown": 50,
+      "kd": 2.0,
+      "timePlayed": "10h 30m",
+      "distanceMoved": "10000m",
+      "rankName": "Captain",
+      "rankIcon": "/rank/captain.png"
+    }
+  ]
+}
+```
+
+Numbers missing from the upstream table are `null` rather than `0`. `hasNext` / `hasPrevious` mirror the pagination links of the upstream page. `id` is `db:username`.
+
+**Search window behavior**: when `search` is supplied, the upstream `view_players.php` ignores the `start` parameter and always answers from the beginning of its own result set. The returned `offset` / `limit` therefore do not slice the search window; use `hasNext` / `hasPrevious` to walk the pages the upstream exposes.
+
+Example:
+
+```bash
+curl "http://localhost:5800/api/players.json?db=pacific&sort=kills&limit=10"
+```
+
+#### Errors
+
+Both JSON endpoints answer with a JSON body on failure:
+
+- `400 Bad Request` — invalid query parameter (unknown `db`/`sort`, `limit` outside `1`–`100`, negative `offset`, non-boolean `online_only`, ...): `{"error": "..."}`. The upstream is not contacted.
+- `502 Bad Gateway` — the upstream request failed or returned data that could not be parsed: `{"error": "..."}`.
+
+The existing `/api/server_list` and `/api/player_list` endpoints are untouched raw passthroughs; they keep returning the upstream HTML/XML with the original query string.
+
+## MCP Server
+
+The process also serves a [Model Context Protocol](https://modelcontextprotocol.io) server over **Streamable HTTP** on a separate listener. It exposes the same normalized data as the JSON endpoints through four read-only tools.
+
+- Endpoint: `http://<MCP_HOST>:<MCP_PORT>/mcp` (default `http://127.0.0.1:5801/mcp`).
+- Transport: Streamable HTTP, **stateless** (`legacy_session_mode` off, plain JSON responses). Every `POST /mcp` is independent; no `Mcp-Session-Id` bookkeeping is required.
+- Tool results carry their payload in `structuredContent`, and failures set `isError: true` with a `structuredContent.error` message. Invalid arguments (unknown `db`/`sort`, `limit` out of range, ...) are JSON-RPC `-32602` errors instead.
+- The server is read-only: no writes, no arbitrary URL proxying.
+
+### Tools
+
+| Tool | Parameters | Result |
+|------|------------|--------|
+| `list_servers` | `search`, `online_only`, `map`, `mode`, `country`, `offset`, `limit` — same semantics as `/api/servers.json` | `{total, offset, limit, servers}` |
+| `get_server` | `address` (string), `port` (integer) | One server object, or `isError` with `{error: "server not found"}` |
+| `search_players` | `search`, `db`, `sort`, `offset`, `limit` — same semantics as `/api/players.json` | `{db, offset, limit, hasNext, hasPrevious, players}` |
+| `list_maps` | none | `{maps: [{name, path, image}]}` |
+
+Like the REST player endpoint, `search_players` delegates `search` to the upstream leaderboard, whose search mode ignores `start`; use `hasNext`/`hasPrevious` to walk those pages.
+
+### Connecting
+
+Claude Code:
+
+```bash
+claude mcp add --transport http rwrs http://127.0.0.1:5801/mcp
+```
+
+Any MCP client configured for Streamable HTTP uses the same URL; there is no authentication.
+
+Raw `curl` walkthrough (initialize, then list tools, then call one):
+
+```bash
+# 1. initialize
+curl -sS -X POST http://127.0.0.1:5801/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2025-11-25' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"curl","version":"0.1.0"}}}'
+
+# 2. list tools
+curl -sS -X POST http://127.0.0.1:5801/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2025-11-25' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+
+# 3. call a tool
+curl -sS -X POST http://127.0.0.1:5801/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2025-11-25' \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_servers","arguments":{"limit":2}}}'
+```
+
+### Configuration and security
+
+- `MCP_HOST` defaults to `127.0.0.1` and never inherits `HOST`: with `HOST=0.0.0.0` the MCP listener stays on loopback unless `MCP_HOST` is set explicitly. IPv6 addresses may be written `::1` or `[::1]`; brackets are normalized to `::1`. `MCP_PORT` defaults to `5801`.
+- `MCP_PORT` must differ from `PORT`; if both name the same port the MCP listener is disabled with an error log and the main server keeps running.
+- `MCP_PORT=0` disables the MCP listener; the main JSON/static server keeps running normally.
+- No authentication, OAuth or rate limiting is implemented. Keep the listener on loopback (the default) and put it behind a reverse proxy that authenticates and filters requests before exposing it.
+- MCP validates the incoming `Host` header to block DNS-rebinding. When `MCP_ALLOWED_HOSTS` is unset, a loopback `MCP_HOST` gets `localhost,127.0.0.1,::1`; a non-loopback `MCP_HOST` disables that validation and logs a warning. Set `MCP_ALLOWED_HOSTS=example.com,example.com:5801` to allow public hostnames explicitly.
+
+Docker:
+
+```bash
+docker run -d -p 80:80 -p 5801:5801 --name rwrs-server \
+  -e HOST=0.0.0.0 \
+  -e PORT=80 \
+  -e MCP_HOST=0.0.0.0 \
+  -e MCP_ALLOWED_HOSTS=rwrs.example.com \
+  zhaozisong0/rwrs-server:latest
+```
+
+`MCP_ALLOWED_HOSTS` must contain the hostname clients put in the URL (here `rwrs.example.com`); anything else is rejected with HTTP 403 before reaching a tool. Publishing port 5801 exposes an unauthenticated endpoint, so terminate authentication/TLS in a reverse proxy or restrict access at the network level. To keep MCP off entirely, add `-e MCP_PORT=0`.
+
+Kubernetes:
+
+- Set `MCP_HOST=0.0.0.0` inside the Pod; a Service or Ingress cannot reach the Pod's loopback interface.
+- Add a ClusterIP Service port for `5801` and route the `/mcp` Ingress path to it. Keep `5801` off the public edge; only the existing 80/443 entry point needs to be exposed.
+- `MCP_ALLOWED_HOSTS` must contain the public Ingress hostname, for example `robin.example.com`.
+- Restrict the `5801` Service port with a `NetworkPolicy` that allows only the Ingress controller.
+
 ## Maps Configuration
 
 Maps are configured through a JSON file specified by the `MAPS_CONFIG` environment variable (default: `maps.json`). The configuration is exposed via the `/api/maps` endpoint.
@@ -236,15 +447,13 @@ Create a `maps.json` file in the same directory as the executable (or specify a 
 Returns a JSON response with all configured maps:
 
 ```json
-{
-  "maps": [
-    {
-      "name": "map9",
-      "path": "media/packages/vanilla.desert/maps/map9",
-      "image": "md5_1.png"
-    }
-  ]
-}
+[
+  {
+    "name": "map9",
+    "path": "media/packages/vanilla.desert/maps/map9",
+    "image": "md5_1.png"
+  }
+]
 ```
 
 ### Configuration Examples
@@ -463,16 +672,13 @@ services:
 
 ```bash
 # Run all tests
-cargo test
+cargo test --all-features
 
 # Run tests with output
-cargo test -- --nocapture
+cargo test --all-features -- --nocapture
 
-# Run specific test module
-cargo test api_cache_tests
-
-# Run integration tests only
-cargo test --test '*'
+# Run a specific test module
+cargo test --all-features cache_tests
 
 # Run tests with coverage (requires cargo-llvm-cov)
 cargo install cargo-llvm-cov
@@ -498,11 +704,13 @@ open target/llvm-cov/html/index.html
 
 ### Test Structure
 
-- **Unit Tests**: Located in `tests/` directory
-  - `api_cache_tests.rs` - Tests for ApiCache functionality
-  - `maps_config_tests.rs` - Tests for MapsConfig loading and parsing
-  - `api_endpoints_tests.rs` - Integration tests for API endpoints
-  - `test_data/` - Test configuration and data files
+- **Tests**: Located in `src/tests/` and compiled as part of the crate
+  - `basic_tests.rs` - Config, maps, announcement, and version helpers
+  - `cache_tests.rs` - `ApiCache` caching and single-flight behavior
+  - `integration_tests.rs` - Maps configuration file loading
+  - `json_api_tests.rs` - Salvo routes, query validation, and error mapping
+  - `json_data_tests.rs` - Upstream parsers, pagination, and query facade
+  - `mcp_tests.rs` - MCP protocol, tools, and `Host` validation
 
 ### Continuous Integration
 

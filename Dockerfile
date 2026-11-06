@@ -24,7 +24,7 @@ FROM scratch
 # copy the build artifact from the build stage
 COPY --from=build /app/target/x86_64-unknown-linux-musl/release/rwrs-server .
 
-EXPOSE 5800
+EXPOSE 5800 5801
 
 # set the startup command to run your binary
 CMD ["./rwrs-server"]

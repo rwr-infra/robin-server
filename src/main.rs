@@ -1,136 +1,15 @@
-use salvo::affix_state;
 use salvo::prelude::*;
-use salvo::serve_static::StaticDir;
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 // Import from lib.rs
+use rwrs_server::mcp;
+use rwrs_server::routes::build_router;
+use rwrs_server::upstream::RwrsService;
 use rwrs_server::{
-    Announcement, ApiCache, Config, MapsConfig, RepoVersion, VersionInfo, get_latest_tag,
+    Announcement, ApiCache, Config, MapsConfig, default_mcp_allowed_hosts, format_mcp_url,
+    is_loopback_host, mcp_port_conflicts_with_main,
 };
-
-#[handler]
-async fn ping() -> &'static str {
-    "pong"
-}
-
-#[handler]
-async fn maps_handler(depot: &mut Depot, res: &mut Response) {
-    let maps_config = depot.obtain::<Arc<MapsConfig>>().unwrap();
-    let maps = maps_config.get_maps();
-
-    res.render(Json(&maps));
-}
-
-#[handler]
-async fn announcement_handler(depot: &mut Depot, res: &mut Response) {
-    let announcement = depot.obtain::<Arc<Announcement>>().unwrap();
-    res.render(Json(announcement.as_ref()));
-}
-
-#[handler]
-async fn version_handler(depot: &mut Depot, res: &mut Response) {
-    let config = depot.obtain::<Arc<Config>>().unwrap();
-
-    let android_version = if let Some(ref android_repo_url) = config.android_repo_url {
-        match get_latest_tag(android_repo_url).await {
-            Some((version, url)) => RepoVersion {
-                version: Some(version),
-                url: Some(url),
-            },
-            None => RepoVersion {
-                version: None,
-                url: None,
-            },
-        }
-    } else {
-        RepoVersion {
-            version: None,
-            url: None,
-        }
-    };
-
-    let web_version = if let Some(ref web_repo_url) = config.web_repo_url {
-        match get_latest_tag(web_repo_url).await {
-            Some((version, url)) => RepoVersion {
-                version: Some(version),
-                url: Some(url),
-            },
-            None => RepoVersion {
-                version: None,
-                url: None,
-            },
-        }
-    } else {
-        RepoVersion {
-            version: None,
-            url: None,
-        }
-    };
-
-    let version_info = VersionInfo {
-        android: android_version,
-        web: web_version,
-    };
-
-    res.render(Json(&version_info));
-}
-
-#[handler]
-async fn servers_handler(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    // Get cache from depot
-    let cache = depot.obtain::<Arc<ApiCache>>().unwrap();
-
-    // Get query string from original request
-    let query_string = req.uri().query().unwrap_or("");
-    let base_url = "http://rwr.runningwithrifles.com/rwr_server_list/get_server_list.php";
-    let url = if query_string.is_empty() {
-        base_url.to_string()
-    } else {
-        format!("{}?{}", base_url, query_string)
-    };
-
-    match cache.get_cached_response(&url).await {
-        Ok((data, status_code)) => {
-            // Cache successful response
-            res.status_code(StatusCode::from_u16(status_code).unwrap_or(StatusCode::OK));
-            res.render(Text::Html(data));
-        }
-        Err(e) => {
-            error!("Failed to get server list: {}", e);
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Text::Plain(format!("Unable to fetch server list: {}", e)));
-        }
-    }
-}
-
-#[handler]
-async fn players_handler(req: &mut Request, depot: &mut Depot, res: &mut Response) {
-    // Get cache from depot
-    let cache = depot.obtain::<Arc<ApiCache>>().unwrap();
-
-    // Get query string from original request
-    let query_string = req.uri().query().unwrap_or("");
-    let base_url = "http://rwr.runningwithrifles.com/rwr_stats/view_players.php";
-    let url = if query_string.is_empty() {
-        base_url.to_string()
-    } else {
-        format!("{}?{}", base_url, query_string)
-    };
-
-    match cache.get_cached_response(&url).await {
-        Ok((data, status_code)) => {
-            // Cache successful response
-            res.status_code(StatusCode::from_u16(status_code).unwrap_or(StatusCode::OK));
-            res.render(Text::Html(data));
-        }
-        Err(e) => {
-            error!("Failed to get players data: {}", e);
-            res.status_code(StatusCode::INTERNAL_SERVER_ERROR);
-            res.render(Text::Plain(format!("Unable to fetch players data: {}", e)));
-        }
-    }
-}
 
 #[tokio::main]
 async fn main() {
@@ -188,41 +67,59 @@ async fn main() {
 
     // Create config for sharing
     let config = Arc::new(config);
+    let data_service = Arc::new(RwrsService::new(cache));
 
-    let router = Router::new()
-        .hoop(RequestId::new())
-        .push(Router::new().path("/ping").get(ping))
-        .push(
-            Router::new()
-                .path("/api/version")
-                .hoop(affix_state::inject(config.clone()))
-                .get(version_handler),
-        )
-        .push(
-            Router::new()
-                .path("/api/maps")
-                .hoop(affix_state::inject(maps_config.clone()))
-                .get(maps_handler),
-        )
-        .push(
-            Router::new()
-                .path("/api/announcement")
-                .hoop(affix_state::inject(announcement.clone()))
-                .get(announcement_handler),
-        )
-        .push(
-            Router::new()
-                .path("/api/server_list")
-                .hoop(affix_state::inject(cache.clone()))
-                .goal(servers_handler),
-        )
-        .push(
-            Router::new()
-                .path("/api/player_list")
-                .hoop(affix_state::inject(cache.clone()))
-                .goal(players_handler),
-        )
-        .push(Router::with_path("{**path}").get(StaticDir::new(["static"]).defaults("index.html")));
+    match config.mcp_port {
+        Some(port) if mcp_port_conflicts_with_main(Some(port), &config.port) => {
+            error!(
+                "MCP_PORT {} conflicts with the main PORT {}; MCP listener disabled",
+                port, config.port
+            );
+        }
+        Some(port) => {
+            // Resolve the MCP Host allowlist. Explicit configuration wins;
+            // otherwise a loopback bind gets the rmcp default allowlist. A
+            // non-loopback bind without MCP_ALLOWED_HOSTS disables Host
+            // validation, which is unsafe for an unauthenticated endpoint, so
+            // say so loudly.
+            let allowed_hosts = match config.mcp_allowed_hosts.clone() {
+                Some(hosts) => Some(hosts),
+                None if is_loopback_host(&config.mcp_host) => {
+                    Some(default_mcp_allowed_hosts(&config.mcp_host))
+                }
+                None => {
+                    warn!(
+                        "MCP_HOST '{}' is not loopback and MCP_ALLOWED_HOSTS is not set; \
+                         disabling rmcp Host header validation. The MCP endpoint has no \
+                         authentication: expose it only behind a protected reverse proxy.",
+                        config.mcp_host
+                    );
+                    None
+                }
+            };
+
+            info!(
+                "MCP Streamable HTTP listening at {}",
+                format_mcp_url(&config.mcp_host, port)
+            );
+            if let Some(hosts) = &allowed_hosts {
+                info!("  - MCP allowed hosts: {}", hosts.join(", "));
+            }
+
+            let mcp_host = config.mcp_host.clone();
+            let service = data_service.clone();
+            let maps = maps_config.clone();
+            tokio::spawn(async move {
+                match mcp::serve_http(&mcp_host, port, service, maps, allowed_hosts).await {
+                    Ok(()) => info!("MCP server stopped"),
+                    Err(error) => error!("MCP server failed on {}:{}: {}", mcp_host, port, error),
+                }
+            });
+        }
+        None => info!("MCP server disabled (MCP_PORT=0)"),
+    }
+
+    let router = build_router(config, maps_config, announcement, data_service);
 
     let service = Service::new(router).hoop(Logger::new());
     let acceptor = TcpListener::new(listen_addr).bind().await;
