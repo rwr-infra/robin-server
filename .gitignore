@@ -44,3 +44,6 @@ Thumbs.db
 logs/
 .agents/
 .claude/
+
+# Local docs
+docs/
