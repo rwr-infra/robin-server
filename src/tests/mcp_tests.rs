@@ -370,7 +370,7 @@ mod tests {
             initialize["result"]["capabilities"]["tools"].is_object(),
             "initialize result: {initialize}"
         );
-        assert_eq!(initialize["result"]["serverInfo"]["name"], "rwrs-server");
+        assert_eq!(initialize["result"]["serverInfo"]["name"], "robin rwr");
 
         let notification = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
         let response = server.post(&client, &notification).await;
