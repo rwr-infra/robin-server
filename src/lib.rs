@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::env;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{error, info};
 
 pub mod domain;
@@ -369,6 +369,7 @@ impl Config {
 
 pub struct ApiCache {
     cache: Arc<RwLock<HashMap<String, CachedResponse>>>,
+    inflight: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     cache_expiry_duration: Duration,
     client: reqwest::Client,
 }
@@ -385,32 +386,30 @@ impl ApiCache {
 
         Self {
             cache: Arc::new(RwLock::new(HashMap::new())),
+            inflight: Mutex::new(HashMap::new()),
             cache_expiry_duration: Duration::from_secs(cache_expiry_secs),
             client,
         }
     }
 
-    pub async fn get_cached_response(&self, url: &str) -> Result<(String, u16), String> {
-        // Check cache for this specific URL
-        {
-            let cache_guard = self.cache.read().await;
-            if let Some(cached) = cache_guard.get(url) {
-                if !cached.is_expired(self.cache_expiry_duration) {
-                    info!(
-                        "Cache hit for {}, age: {:?}",
-                        url,
-                        cached.timestamp.elapsed()
-                    );
-                    return Ok((cached.data.clone(), cached.status_code));
-                } else {
-                    info!("Cache expired for {}, refreshing required", url);
-                }
-            } else {
-                info!("No cache data available for {}, fetching from API", url);
-            }
+    /// Return a fresh cache entry, or `None` when the URL is missing/expired.
+    async fn cached_response(&self, url: &str) -> Option<(String, u16)> {
+        let cache_guard = self.cache.read().await;
+        let cached = cache_guard.get(url)?;
+        if cached.is_expired(self.cache_expiry_duration) {
+            return None;
         }
 
-        // Make actual API call using the shared client
+        info!(
+            "Cache hit for {}, age: {:?}",
+            url,
+            cached.timestamp.elapsed()
+        );
+        Some((cached.data.clone(), cached.status_code))
+    }
+
+    /// Fetch `url` and cache the response.
+    async fn fetch_and_cache(&self, url: &str) -> Result<(String, u16), String> {
         info!("Making request to external API: {}", url);
         match self.client.get(url).send().await {
             Ok(response) => {
@@ -435,6 +434,43 @@ impl ApiCache {
                 Err(format!("Request failed: {}", e))
             }
         }
+    }
+
+    pub async fn get_cached_response(&self, url: &str) -> Result<(String, u16), String> {
+        if let Some(response) = self.cached_response(url).await {
+            return Ok(response);
+        }
+
+        info!(
+            "No fresh cache data available for {}, fetching from API",
+            url
+        );
+
+        // Single-flight: concurrent misses for the same URL share one
+        // per-URL lock, so only the first caller talks to the upstream.
+        let lock = {
+            let mut inflight = self.inflight.lock().await;
+            inflight
+                .entry(url.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+
+        let _guard = lock.lock().await;
+
+        // A previous holder may have populated the cache while we waited.
+        if let Some(response) = self.cached_response(url).await {
+            return Ok(response);
+        }
+
+        info!("Fetching {} after an in-flight miss", url);
+        let result = self.fetch_and_cache(url).await;
+
+        // Drop the map entry after the attempt. Callers already waiting on
+        // this Arc still serialize on it; later callers either hit the cache
+        // or start a fresh request.
+        self.inflight.lock().await.remove(url);
+        result
     }
 
     async fn update_cache(&self, url: String, data: String, status_code: u16) {

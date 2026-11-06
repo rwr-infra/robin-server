@@ -244,4 +244,37 @@ mod tests {
         assert_eq!(result2.1, 201);
         assert_eq!(result2.0, "created");
     }
+
+    #[tokio::test]
+    async fn test_concurrent_misses_fetch_upstream_once() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/slow"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("slow_data")
+                    .set_delay(Duration::from_millis(200)),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let cache = std::sync::Arc::new(ApiCache::new(30));
+        let url = format!("{}/slow", mock_server.uri());
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let cache = cache.clone();
+            let url = url.clone();
+            handles.push(tokio::spawn(async move {
+                cache.get_cached_response(&url).await.unwrap()
+            }));
+        }
+
+        for handle in handles {
+            let result = handle.await.unwrap();
+            assert_eq!(result, ("slow_data".to_string(), 200));
+        }
+    }
 }
